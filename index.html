@@ -518,19 +518,35 @@ function renderWind(){const c=cond;if(!c)return;const P=$("#windPanel");
  $("#windAlt").innerHTML=lv[2]==="good"&&windEff(c.wind,c.gust)<12?"":'<p class="status" style="margin:0">Cerco zone meno ventose nei dintorni…</p>';
  loadWindAlt()}
 let windTok=0,windLayer=null;
+/* Riparo: km di mare aperto sopravvento prima di incontrare terra (sonde a 0,7/1,5/3/5 km; 99 = aperto). Più terra vicina sopravento = vento e onda ridotti. */
+async function depthRetry(lat,lon){let d=await fetchDepth(lat,lon);if(d==null){await new Promise(r=>setTimeout(r,400));d=await fetchDepth(lat,lon)}return d}
+async function openFetch(lat,lon,dir){const ks=[.7,1.5,3,5];
+ const ds=await Promise.all(ks.map(k=>{const q=destPoint(lat,lon,k,dir);return depthRetry(q.lat,q.lon)}));
+ for(let i=0;i<ks.length;i++)if(ds[i]&&ds[i].land)return ks[i];return 99}
+const shelterK=f=>f<=.7?.45:f<=1.5?.6:f<=3?.8:f<=5?.92:1;
+async function runPool(items,n,fn){const out=[];let i=0;await Promise.all(Array.from({length:n},async()=>{while(i<items.length){const k=i++;out[k]=await fn(items[k])}}));return out}
 async function loadWindAlt(){const tok=++windTok,pt=point,box=$("#windAlt");if(!pt||!cond)return;
  if(windLayer)windLayer.clearLayers();
- const c0=windEff(cond.wind,cond.gust);if(c0!=null&&c0<12){box.innerHTML='<p class="status" style="margin:0">Già tranquillo: non serve spostarsi per il vento.</p>';return}
- try{const mode=settings.mode;const all=await fetchWindAround(pt.lat,pt.lon,mode);if(tok!==windTok)return;
-  const o=all[0],s0=windScore(o)??windScore({w:cond.wind,g:cond.gust,wave:cond.wave});if(s0==null){box.innerHTML="";return}
-  const cand=all.slice(1).filter(p=>{const s=windScore(p);return s!=null&&s<=s0*.75&&s0-s>=4&&(!p.hasMarine||p.wave!=null)}).sort((a,b)=>windScore(a)-windScore(b));
-  const good=[];for(const p of cand){if(good.length>=3)break;if(good.some(q=>haversine(q.lat,q.lon,p.lat,p.lon)<3))continue;
-   const d=await fetchDepth(p.lat,p.lon);if(tok!==windTok)return;if(d&&!d.land)good.push({...p,depth:d.depth})}
-  if(!good.length){box.innerHTML=`<p class="status" style="margin:0">Nel raggio di ${mode==="barca"?12:8} km non trovo un punto in acqua sensibilmente meno ventoso: il vento è simile ovunque.</p>`;return}
-  box.innerHTML=`<p class="meta" style="margin:0"><b>Meno ventoso, nei dintorni:</b></p><div class="walt">`+good.map((p,i)=>{const s=windScore(p),gain=Math.round((1-s/s0)*100);
-   return `<button class="btn" data-i="${i}"><span>Verso ${COMPASS[Math.round(p.brg/45)%8]} · ${p.km} km</span><small>${fx(p.w,0)} km/h${p.g!=null?` (raffiche ${fx(p.g,0)})`:""}${p.wave!=null?` · onda ${fx(p.wave)} m`:""}${p.depth!=null?` · fondale ~${fx(p.depth,0)} m`:""} · circa −${gain}% di disagio</small></button>`}).join("")+`</div><p class="status" style="margin:0">${mode==="riva"?"Da riva: è il tratto di costa in quella direzione, verifica l'accesso. ":""}Stima da modello meteo a griglia: vicino alla costa il riparo reale dipende dal rilievo. Tocca per spostare il punto.</p>`;
+ const e0=windEff(cond.wind,cond.gust);if(e0!=null&&e0<12){box.innerHTML='<p class="status" style="margin:0">Già tranquillo: non serve spostarsi per il vento.</p>';return}
+ const dir=cond.windDir,mode=settings.mode;
+ try{const all=await fetchWindAround(pt.lat,pt.lon,mode);if(tok!==windTok)return;
+  const o=all[0];
+  const dep=await runPool(all.slice(1),4,p=>depthRetry(p.lat,p.lon));if(tok!==windTok)return;
+  const sea=all.slice(1).map((p,i)=>({...p,depth:dep[i]&&!dep[i].land?dep[i].depth:null,ok:!!(dep[i]&&!dep[i].land)})).filter(p=>p.ok);
+  let fo=99;
+  if(dir!=null){fo=await openFetch(pt.lat,pt.lon,dir);const fs=await runPool(sea,3,p=>openFetch(p.lat,p.lon,dir));sea.forEach((p,i)=>p.fetch=fs[i])}
+  if(tok!==windTok)return;
+  const score=(p,f)=>{const e=windEff(p.w,p.g);return e==null?null:(e+15*(p.wave||0))*shelterK(f)};
+  const s0=score(o,fo)??score({w:cond.wind,g:cond.gust,wave:cond.wave},fo);if(s0==null){box.innerHTML="";return}
+  sea.forEach(p=>{p.s=score(p,p.fetch??99);p.k=shelterK(p.fetch??99)});
+  const good=[];for(const p of sea.filter(p=>p.s!=null&&p.s<=s0*.8&&s0-p.s>=3).sort((a,b)=>a.s-b.s)){if(good.length>=3)break;if(good.some(q=>haversine(q.lat,q.lon,p.lat,p.lon)<2))continue;good.push(p)}
+  const R=mode==="barca"?12:8;
+  if(!good.length){box.innerHTML=`<p class="status" style="margin:0">Nel raggio di ${R} km non trovo un punto in acqua più riparato${dir!=null?` dal vento da ${windName(dir)}`:""}${fo<=3?": qui hai già la terra sopravento":""}.</p>`;return}
+  box.innerHTML=`<p class="meta" style="margin:0"><b>Meno ventoso, nei dintorni:</b></p><div class="walt">`+good.map((p,i)=>{const gain=Math.round((1-p.s/s0)*100);
+   const why=p.fetch<99?`terra a ~${fx(p.fetch,1)} km sopravento, riparato`:"vento leggermente minore";
+   return `<button class="btn" data-i="${i}"><span>Verso ${COMPASS[Math.round(p.brg/45)%8]} · ${p.km} km — circa −${gain}% di disagio</span><small>${why} · vento stimato ~${fx(p.w*p.k,0)} km/h${p.wave!=null?` · onda ~${fx(p.wave*p.k)} m`:""}${p.depth!=null?` · fondale ~${fx(p.depth,0)} m`:""}</small></button>`}).join("")+`</div><p class="status" style="margin:0">${mode==="riva"?"Da riva: è il tratto di costa in quella direzione, verifica l'accesso. ":""}Stima: vento del modello meteo ridotto dalla terra sopravento (costa letta dalla batimetria). Tocca per spostare il punto.</p>`;
   box._cands=good;
-  if(map){if(!windLayer)windLayer=L.layerGroup().addTo(map);good.forEach((p,i)=>L.circleMarker([p.lat,p.lon],{radius:7,color:cssVar("--good"),weight:2,fillOpacity:.35}).bindTooltip(`${i+1}: ${fx(p.w,0)} km/h`).on("click",()=>setPoint(p.lat,p.lon,"mappa")).addTo(windLayer))}
+  if(map){if(!windLayer)windLayer=L.layerGroup().addTo(map);good.forEach((p,i)=>L.circleMarker([p.lat,p.lon],{radius:8,color:cssVar("--good"),weight:3,fillOpacity:.4}).bindTooltip(`${i+1}: ~${fx(p.w*p.k,0)} km/h`,{permanent:true,direction:"top"}).on("click",()=>setPoint(p.lat,p.lon,"mappa")).addTo(windLayer))}
  }catch(e){if(tok===windTok)box.innerHTML='<p class="status" style="margin:0">Non riesco a cercare zone alternative (offline?).</p>'}}
 $("#windAlt").addEventListener("click",e=>{const b=e.target.closest("button[data-i]");const p=b&&$("#windAlt")._cands&&$("#windAlt")._cands[+b.dataset.i];if(p)setPoint(p.lat,p.lon,"mappa")});
 function lightOf(t,sr,ss){for(let i=0;i<sr.length;i++){if(Math.abs(t-sr[i])<=75*60e3)return"alba";if(Math.abs(t-ss[i])<=75*60e3)return"tramonto"}for(let i=0;i<sr.length;i++)if(t>sr[i]&&t<ss[i])return"giorno";return"notte"}
